@@ -1,0 +1,517 @@
+// AbastGo - Sistema de Gestión de Dispensarios Farmacéuticos
+// Prisma Schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ===========================================
+// Usuarios y Autenticación
+// ===========================================
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String    @map("password_hash")
+  name          String
+  phone         String?
+  isActive      Boolean   @default(true) @map("is_active")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  // Relaciones
+  roles          UserRole[]
+  warehouseUsers WarehouseUser[]
+  deliveries     Delivery[]       @relation("DeliveredBy")
+  auditLogs      AuditLog[]
+
+  @@map("users")
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+
+  // Relaciones
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  code        String   @unique  // ej: "inventory.create", "patients.view"
+  module      String              // ej: "inventory", "patients"
+  description String?
+
+  // Relaciones
+  roles       RolePermission[]
+
+  @@map("permissions")
+}
+
+model UserRole {
+  userId String @map("user_id")
+  roleId String @map("role_id")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+model RolePermission {
+  roleId       String @map("role_id")
+  permissionId String @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// ===========================================
+// Bodegas y Dispensarios
+// ===========================================
+
+enum WarehouseType {
+  BODEGA
+  DISPENSARIO
+}
+
+model Warehouse {
+  id       String        @id @default(cuid())
+  code     String        @unique
+  name     String
+  type     WarehouseType
+  address  String?
+  city     String?
+  isActive Boolean       @default(true) @map("is_active")
+
+  // Relaciones
+  users           WarehouseUser[]
+  inventory       Inventory[]
+  transfersFrom   Transfer[]        @relation("TransferFrom")
+  transfersTo     Transfer[]        @relation("TransferTo")
+  deliveries      Delivery[]
+  pendingItems    PendingItem[]
+  purchaseReceipts PurchaseReceipt[]
+
+  @@map("warehouses")
+}
+
+model WarehouseUser {
+  userId      String @map("user_id")
+  warehouseId String @map("warehouse_id")
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@id([userId, warehouseId])
+  @@map("warehouse_users")
+}
+
+// ===========================================
+// Productos y Proveedores
+// ===========================================
+
+model Supplier {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  nit       String?
+  address   String?
+  phone     String?
+  email     String?
+  isActive  Boolean  @default(true) @map("is_active")
+
+  // Relaciones
+  purchaseOrders PurchaseOrder[]
+
+  @@map("suppliers")
+}
+
+model Product {
+  id            String   @id @default(cuid())
+  code          String   @unique
+  barcode       String?
+  name          String
+  molecule      String?    // Principio activo
+  presentation  String?    // Tabletas, Jarabe, etc.
+  concentration String?    // 500mg, 10ml, etc.
+  unit          String?    // Unidad, Caja, Frasco
+  price         Decimal  @db.Decimal(10, 2)
+  minStock      Int      @default(0) @map("min_stock")
+  isActive      Boolean  @default(true) @map("is_active")
+
+  // Relaciones
+  inventory           Inventory[]
+  purchaseOrderItems  PurchaseOrderItem[]
+  transferItems       TransferItem[]
+  prescriptionItems   PrescriptionItem[]
+  deliveryItems       DeliveryItem[]
+
+  @@map("products")
+}
+
+// ===========================================
+// Compras e Inventario
+// ===========================================
+
+enum PurchaseOrderStatus {
+  PENDING
+  PARTIAL
+  RECEIVED
+  CANCELLED
+}
+
+model PurchaseOrder {
+  id           String              @id @default(cuid())
+  orderNumber  String              @unique @map("order_number")
+  supplierId   String              @map("supplier_id")
+  orderDate    DateTime            @default(now()) @map("order_date")
+  status       PurchaseOrderStatus @default(PENDING)
+  notes        String?
+  createdAt    DateTime            @default(now()) @map("created_at")
+
+  supplier Supplier            @relation(fields: [supplierId], references: [id])
+  items    PurchaseOrderItem[]
+  receipts PurchaseReceipt[]
+
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderItem {
+  id              String  @id @default(cuid())
+  purchaseOrderId String  @map("purchase_order_id")
+  productId       String  @map("product_id")
+  quantity        Int
+  unitCost        Decimal @db.Decimal(10, 2) @map("unit_cost")
+  receivedQty     Int     @default(0) @map("received_qty")
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  product       Product       @relation(fields: [productId], references: [id])
+
+  @@map("purchase_order_items")
+}
+
+model PurchaseReceipt {
+  id              String   @id @default(cuid())
+  purchaseOrderId String   @map("purchase_order_id")
+  warehouseId     String   @map("warehouse_id")
+  receiptDate     DateTime @default(now()) @map("receipt_date")
+  invoiceNumber   String?  @map("invoice_number")
+  notes           String?
+
+  purchaseOrder PurchaseOrder   @relation(fields: [purchaseOrderId], references: [id])
+  warehouse     Warehouse       @relation(fields: [warehouseId], references: [id])
+  items         ReceiptItem[]
+
+  @@map("purchase_receipts")
+}
+
+model ReceiptItem {
+  id              String   @id @default(cuid())
+  receiptId       String   @map("receipt_id")
+  inventoryId     String   @map("inventory_id")
+  quantity        Int
+
+  receipt   PurchaseReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  inventory Inventory       @relation(fields: [inventoryId], references: [id])
+
+  @@map("receipt_items")
+}
+
+model Inventory {
+  id          String   @id @default(cuid())
+  productId   String   @map("product_id")
+  warehouseId String   @map("warehouse_id")
+  lotNumber   String?  @map("lot_number")
+  expiryDate  DateTime? @map("expiry_date")
+  quantity    Int      @default(0)
+  unitCost    Decimal  @db.Decimal(10, 2) @map("unit_cost")
+
+  product       Product       @relation(fields: [productId], references: [id])
+  warehouse     Warehouse     @relation(fields: [warehouseId], references: [id])
+  receiptItems  ReceiptItem[]
+
+  @@unique([productId, warehouseId, lotNumber])
+  @@map("inventory")
+}
+
+// ===========================================
+// Traslados entre Bodegas
+// ===========================================
+
+enum TransferStatus {
+  PENDING
+  IN_TRANSIT
+  RECEIVED
+  CANCELLED
+}
+
+model Transfer {
+  id             String         @id @default(cuid())
+  transferNumber String         @unique @map("transfer_number")
+  fromWarehouseId String        @map("from_warehouse_id")
+  toWarehouseId   String        @map("to_warehouse_id")
+  status          TransferStatus @default(PENDING)
+  createdAt       DateTime       @default(now()) @map("created_at")
+  receivedAt      DateTime?      @map("received_at")
+  notes           String?
+
+  fromWarehouse Warehouse      @relation("TransferFrom", fields: [fromWarehouseId], references: [id])
+  toWarehouse   Warehouse      @relation("TransferTo", fields: [toWarehouseId], references: [id])
+  items         TransferItem[]
+
+  @@map("transfers")
+}
+
+model TransferItem {
+  id         String @id @default(cuid())
+  transferId String @map("transfer_id")
+  productId  String @map("product_id")
+  lotNumber  String? @map("lot_number")
+  quantity   Int
+
+  transfer Transfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id])
+
+  @@map("transfer_items")
+}
+
+// ===========================================
+// Pacientes y EPS
+// ===========================================
+
+model EPS {
+  id          String  @id @default(cuid())
+  code        String  @unique
+  name        String
+  hasApi      Boolean @default(false) @map("has_api")
+  apiEndpoint String? @map("api_endpoint")
+  isActive    Boolean @default(true) @map("is_active")
+
+  // Relaciones
+  patientContracts PatientContract[]
+  prescriptions    Prescription[]
+
+  @@map("eps")
+}
+
+enum DocumentType {
+  CC  // Cédula de ciudadanía
+  TI  // Tarjeta de identidad
+  CE  // Cédula de extranjería
+  PA  // Pasaporte
+  RC  // Registro civil
+  NU  // NUIP
+  AS  // Adulto sin identificación
+  MS  // Menor sin identificación
+}
+
+model Patient {
+  id             String       @id @default(cuid())
+  documentType   DocumentType @map("document_type")
+  documentNumber String       @map("document_number")
+  name           String
+  phone          String?
+  address        String?
+  city           String?
+  diagnosis      String?
+  documentPhotoPath String?   @map("document_photo_path") // Foto de cédula
+  documentPhotoDate DateTime? @map("document_photo_date") // Fecha de captura
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  // Relaciones
+  contracts     PatientContract[]
+  prescriptions Prescription[]
+
+  @@unique([documentType, documentNumber])
+  @@map("patients")
+}
+
+model PatientContract {
+  id           String   @id @default(cuid())
+  patientId    String   @map("patient_id")
+  epsId        String   @map("eps_id")
+  affiliationType String @map("affiliation_type") // COTIZANTE, BENEFICIARIO
+  regime       String?  // CONTRIBUTIVO, SUBSIDIADO
+  startDate    DateTime @map("start_date")
+  endDate      DateTime? @map("end_date")
+  isActive     Boolean  @default(true) @map("is_active")
+
+  patient Patient @relation(fields: [patientId], references: [id])
+  eps     EPS     @relation(fields: [epsId], references: [id])
+
+  @@map("patient_contracts")
+}
+
+// ===========================================
+// Prescripciones y Entregas
+// ===========================================
+
+enum PrescriptionStatus {
+  PENDING     // Pendiente de entrega
+  PARTIAL     // Entrega parcial
+  DELIVERED   // Entregada completamente
+  CANCELLED   // Cancelada
+}
+
+model Prescription {
+  id                 String             @id @default(cuid())
+  patientId          String             @map("patient_id")
+  epsId              String             @map("eps_id")
+  prescriptionNumber String             @map("prescription_number")
+  prescriptionDate   DateTime           @map("prescription_date")
+  prescribingDoctor  String?            @map("prescribing_doctor")
+  mipresCode         String?            @map("mipres_code")
+  status             PrescriptionStatus @default(PENDING)
+  createdAt          DateTime           @default(now()) @map("created_at")
+
+  patient   Patient            @relation(fields: [patientId], references: [id])
+  eps       EPS                @relation(fields: [epsId], references: [id])
+  items     PrescriptionItem[]
+  deliveries Delivery[]
+
+  @@map("prescriptions")
+}
+
+model PrescriptionItem {
+  id             String @id @default(cuid())
+  prescriptionId String @map("prescription_id")
+  productId      String @map("product_id")
+  quantity       Int
+  deliveredQty   Int    @default(0) @map("delivered_qty")
+  notes          String?
+
+  prescription Prescription  @relation(fields: [prescriptionId], references: [id], onDelete: Cascade)
+  product      Product       @relation(fields: [productId], references: [id])
+  pendingItems PendingItem[]
+
+  @@map("prescription_items")
+}
+
+enum DeliveryStatus {
+  COMPLETED
+  PARTIAL
+  CANCELLED
+}
+
+model Delivery {
+  id             String         @id @default(cuid())
+  prescriptionId String         @map("prescription_id")
+  warehouseId    String         @map("warehouse_id")
+  deliveredById  String         @map("delivered_by")
+  deliveryDate   DateTime       @default(now()) @map("delivery_date")
+  status         DeliveryStatus @default(COMPLETED)
+  moderatorFee   Decimal?       @db.Decimal(10, 2) @map("moderator_fee")
+  signaturePath  String?        @map("signature_path")
+  notes          String?
+  
+  // Documentos de trazabilidad
+  prescriptionPhotoPath  String?  @map("prescription_photo_path")  // Foto de receta/fórmula
+  deliverySignaturePath  String?  @map("delivery_signature_path")  // Firma de entrega
+  isAuthorizedPickup     Boolean  @default(false) @map("is_authorized_pickup") // Si recoge persona autorizada
+  authorizedPersonName   String?  @map("authorized_person_name")   // Nombre persona autorizada
+  authorizedPersonDoc    String?  @map("authorized_person_doc")    // Documento persona autorizada
+  authorizedDocPhotoPath String?  @map("authorized_doc_photo_path") // Foto documento autorizado
+  authorizationLetterPath String? @map("authorization_letter_path") // Foto carta autorización
+  pendingDeliveryLetterPath String? @map("pending_delivery_letter_path") // Carta pendientes firmada
+
+  prescription Prescription   @relation(fields: [prescriptionId], references: [id])
+  warehouse    Warehouse      @relation(fields: [warehouseId], references: [id])
+  deliveredBy  User           @relation("DeliveredBy", fields: [deliveredById], references: [id])
+  items        DeliveryItem[]
+
+  @@map("deliveries")
+}
+
+model DeliveryItem {
+  id          String  @id @default(cuid())
+  deliveryId  String  @map("delivery_id")
+  productId   String  @map("product_id")
+  lotNumber   String? @map("lot_number")
+  quantity    Int
+
+  delivery Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id])
+
+  @@map("delivery_items")
+}
+
+// ===========================================
+// Pendientes
+// ===========================================
+
+enum PendingStatus {
+  PENDING    // Pendiente
+  NOTIFIED   // Notificado al paciente
+  SHIPPED    // Enviado desde bodega
+  DELIVERED  // Entregado
+  CANCELLED  // Cancelado
+}
+
+model PendingItem {
+  id                  String        @id @default(cuid())
+  prescriptionItemId  String        @map("prescription_item_id")
+  warehouseId         String        @map("warehouse_id")
+  quantity            Int
+  status              PendingStatus @default(PENDING)
+  notifiedAt          DateTime?     @map("notified_at")
+  createdAt           DateTime      @default(now()) @map("created_at")
+
+  prescriptionItem PrescriptionItem @relation(fields: [prescriptionItemId], references: [id])
+  warehouse        Warehouse        @relation(fields: [warehouseId], references: [id])
+
+  @@map("pending_items")
+}
+
+// ===========================================
+// Auditoría
+// ===========================================
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?  @map("user_id")
+  action    String   // CREATE, UPDATE, DELETE
+  entity    String   // Nombre de la tabla
+  entityId  String   @map("entity_id")
+  oldValues Json?    @map("old_values")
+  newValues Json?    @map("new_values")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@map("audit_logs")
+}
+
+// ===========================================
+// Reportes Guardados y Personalizados
+// ===========================================
+
+model SavedReport {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  name        String
+  description String?
+  type        String   // 'favorite' | 'custom'
+  reportType  String?  @map("report_type") // Para favoritos: tipo del reporte estándar
+  query       String?  // Para personalizados: la consulta en lenguaje natural
+  sqlQuery    String?  @map("sql_query") // Query SQL generada por IA
+  filters     Json?    // Filtros guardados (fechas, bodega, etc.)
+  isFavorite  Boolean  @default(false) @map("is_favorite")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("saved_reports")
+}

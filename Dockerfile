@@ -1,0 +1,48 @@
+
+# Etapa de dependencias
+FROM node:18-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Etapa de construcción
+FROM node:18-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Generar cliente prisma
+RUN npx prisma generate
+
+# Construir la aplicación
+RUN npm run build
+
+# Etapa de producción
+FROM node:18-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV production
+
+# Crear usuario no-root
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+# Copiar archivos necesarios
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/package.json ./package.json
+
+# Copiar carpeta .next de forma optimizada (standalone si fuera configurado, por ahora normal)
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+# Copiar prisma para migraciones
+COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
+
+USER nextjs
+
+EXPOSE 3000
+
+ENV PORT 3000
+# Apuntar a localhost por defecto
+ENV HOSTNAME "0.0.0.0"
+
+CMD ["node", "server.js"]

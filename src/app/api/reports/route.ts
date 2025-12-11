@@ -1,14 +1,42 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 
+import { getServerSession } from "next-auth"
+import { authOptions } from "@/lib/auth"
+
 // GET - Generar reportes
 export async function GET(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        if (!session?.user?.organizationId) {
+            return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
+        }
+        const organizationId = session.user.organizationId
+        const orgRole = session.user.orgRole || 'MEMBER'
+
         const { searchParams } = new URL(request.url)
         const type = searchParams.get('type')
         const startDate = searchParams.get('startDate')
         const endDate = searchParams.get('endDate')
-        const warehouseId = searchParams.get('warehouseId')
+        let warehouseIdParam = searchParams.get('warehouseId')
+
+        // Validar permisos de bodega
+        const userWarehouseIds = session.user.warehouseIds || []
+        const isAdmin = orgRole === 'OWNER' || orgRole === 'ADMIN'
+
+        // Si no es admin y tiene bodegas asignadas
+        if (!isAdmin && userWarehouseIds.length > 0) {
+            // Si intenta ver otra bodega, bloquear
+            if (warehouseIdParam && !userWarehouseIds.includes(warehouseIdParam)) {
+                return NextResponse.json({ error: 'No tienes permiso para ver esta bodega' }, { status: 403 })
+            }
+            // Si no especificó bodega, usar su primera bodega asignada (o manejar lógica de todas sus bodegas)
+            if (!warehouseIdParam) {
+                warehouseIdParam = userWarehouseIds[0]
+            }
+        } else if (!isAdmin && userWarehouseIds.length === 0) {
+            return NextResponse.json({ error: 'Usuario sin bodegas asignadas' }, { status: 403 })
+        }
 
         if (!type) {
             return NextResponse.json(
@@ -22,6 +50,9 @@ export async function GET(request: NextRequest) {
 
         const dateStart = startDate ? new Date(startDate) : new Date(new Date().setMonth(new Date().getMonth() - 1))
         const dateEnd = endDate ? new Date(endDate) : new Date()
+
+        // Usar la variable local validada
+        const warehouseId = warehouseIdParam
 
         switch (type) {
             case '1604':
@@ -57,7 +88,8 @@ export async function GET(request: NextRequest) {
           LEFT JOIN patients p ON rx.patient_id = p.id
           LEFT JOIN delivery_items di ON di.delivery_id = d.id
           LEFT JOIN products pr ON di.product_id = pr.id
-          WHERE d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
+          WHERE d.organization_id = ${organizationId}
+          AND d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
           ${warehouseId ? prisma.$queryRaw`AND d.warehouse_id = ${warehouseId}` : prisma.$queryRaw``}
           ORDER BY d.delivery_date DESC
           LIMIT 10000
@@ -123,7 +155,8 @@ export async function GET(request: NextRequest) {
           LEFT JOIN delivery_items di ON di.delivery_id = d.id
           LEFT JOIN products pr ON di.product_id = pr.id
           LEFT JOIN users u ON d.delivered_by_id = u.id
-          WHERE d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
+          WHERE d.organization_id = ${organizationId}
+          AND d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
           ORDER BY d.delivery_date DESC
           LIMIT 10000
         ` as any[]
@@ -174,7 +207,8 @@ export async function GET(request: NextRequest) {
           LEFT JOIN products pr ON pxi.product_id = pr.id
           LEFT JOIN prescriptions rx ON pxi.prescription_id = rx.id
           LEFT JOIN patients p ON rx.patient_id = p.id
-          WHERE pi.status IN ('PENDING', 'NOTIFIED')
+          WHERE pi.organization_id = ${organizationId}
+          AND pi.status IN ('PENDING', 'NOTIFIED')
           ORDER BY pi.created_at DESC
         ` as any[]
 
@@ -215,7 +249,8 @@ export async function GET(request: NextRequest) {
           LEFT JOIN warehouses w ON d.warehouse_id = w.id
           LEFT JOIN delivery_items di ON di.delivery_id = d.id
           LEFT JOIN prescriptions rx ON d.prescription_id = rx.id
-          WHERE d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
+          WHERE d.organization_id = ${organizationId}
+          AND d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
           ${warehouseId ? prisma.$queryRaw`AND d.warehouse_id = ${warehouseId}` : prisma.$queryRaw``}
           GROUP BY DATE(d.delivery_date), w.code, w.name
           ORDER BY fecha DESC, nombre_bodega
@@ -255,7 +290,8 @@ export async function GET(request: NextRequest) {
           FROM deliveries d
           LEFT JOIN warehouses w ON d.warehouse_id = w.id
           LEFT JOIN delivery_items di ON di.delivery_id = d.id
-          WHERE d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
+          WHERE d.organization_id = ${organizationId}
+          AND d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
           ${warehouseId ? prisma.$queryRaw`AND d.warehouse_id = ${warehouseId}` : prisma.$queryRaw``}
           GROUP BY EXTRACT(YEAR FROM d.delivery_date), EXTRACT(MONTH FROM d.delivery_date), w.code, w.name
           ORDER BY año DESC, mes DESC, nombre_bodega
@@ -277,19 +313,35 @@ export async function GET(request: NextRequest) {
 
             case 'inventario_valorizado':
                 // Inventario Valorizado
+                const epsIdParam = searchParams.get('epsId')
+
                 headers = [
-                    'bodega', 'nombre_bodega', 'codigo', 'producto', 'molecula',
+                    'bodega', 'nombre_bodega', 'eps', 'codigo', 'producto', 'molecula',
                     'lote', 'fecha_vencimiento', 'cantidad', 'costo_unitario', 'valor_total'
                 ]
 
+                // Construir filtro de bodegas
+                let warehouseFilter: any = { organizationId }
+
+                if (warehouseId) {
+                    warehouseFilter.id = warehouseId
+                } else if (epsIdParam) {
+                    warehouseFilter.epsId = epsIdParam
+                }
+
+                // Para admin sin filtros específicos, obtener TODAS las bodegas
+                // (no limitar a primera bodega)
+
                 const inventario = await prisma.inventory.findMany({
                     where: {
-                        quantity: { gt: 0 },
-                        ...(warehouseId && { warehouseId })
+                        warehouse: warehouseFilter,
+                        quantity: { gt: 0 }
                     },
                     include: {
                         product: true,
-                        warehouse: true
+                        warehouse: {
+                            include: { eps: true }
+                        }
                     },
                     orderBy: [
                         { warehouse: { name: 'asc' } },
@@ -297,19 +349,48 @@ export async function GET(request: NextRequest) {
                     ]
                 })
 
-                data = inventario.map(inv => ({
-                    bodega: inv.warehouse?.code || '',
-                    nombre_bodega: inv.warehouse?.name || '',
-                    codigo: inv.product?.code || '',
-                    producto: inv.product?.name || '',
-                    molecula: inv.product?.molecule || '',
-                    lote: inv.lotNumber || '',
-                    fecha_vencimiento: inv.expiryDate?.toISOString().split('T')[0] || '',
-                    cantidad: inv.quantity,
-                    costo_unitario: Number(inv.unitCost) || 0,
-                    valor_total: inv.quantity * (Number(inv.unitCost) || 0)
-                }))
+                // Calcular totales
+                let totalUnidades = 0
+                let totalValor = 0
+
+                data = inventario.map(inv => {
+                    const valorItem = inv.quantity * (Number(inv.unitCost) || 0)
+                    totalUnidades += inv.quantity
+                    totalValor += valorItem
+
+                    return {
+                        bodega: inv.warehouse?.code || '',
+                        nombre_bodega: inv.warehouse?.name || '',
+                        eps: inv.warehouse?.eps?.name || '',
+                        codigo: inv.product?.code || '',
+                        producto: inv.product?.name || '',
+                        molecula: inv.product?.molecule || '',
+                        lote: inv.lotNumber || '',
+                        fecha_vencimiento: inv.expiryDate?.toISOString().split('T')[0] || '',
+                        cantidad: inv.quantity,
+                        costo_unitario: Number(inv.unitCost) || 0,
+                        valor_total: valorItem
+                    }
+                })
+
+                // Agregar fila de totales al final
+                if (data.length > 0) {
+                    data.push({
+                        bodega: '',
+                        nombre_bodega: '',
+                        eps: '',
+                        codigo: '',
+                        producto: 'TOTAL GENERAL',
+                        molecula: '',
+                        lote: '',
+                        fecha_vencimiento: '',
+                        cantidad: totalUnidades,
+                        costo_unitario: 0,
+                        valor_total: totalValor
+                    })
+                }
                 break
+
 
             case 'vencimientos':
                 // Próximos Vencimientos (90 días)
@@ -324,6 +405,7 @@ export async function GET(request: NextRequest) {
 
                 const vencimientos = await prisma.inventory.findMany({
                     where: {
+                        warehouse: { organizationId },
                         quantity: { gt: 0 },
                         expiryDate: { lte: en90dias },
                         ...(warehouseId && { warehouseId })
@@ -363,7 +445,10 @@ export async function GET(request: NextRequest) {
                 ]
 
                 const bodegas = await prisma.warehouse.findMany({
-                    where: { isActive: true },
+                    where: {
+                        organizationId,
+                        isActive: true
+                    },
                     include: {
                         inventory: { where: { quantity: { gt: 0 } } }
                     }
@@ -412,7 +497,8 @@ export async function GET(request: NextRequest) {
           LEFT JOIN prescriptions rx ON rx.patient_id = p.id
           LEFT JOIN deliveries d ON d.prescription_id = rx.id
           LEFT JOIN delivery_items di ON di.delivery_id = d.id
-          WHERE d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
+          WHERE p.organization_id = ${organizationId}
+          AND d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
           GROUP BY p.id, p.document_number, p.name, p.phone, p.city
           ORDER BY total_visitas DESC
           LIMIT 5000
@@ -449,7 +535,8 @@ export async function GET(request: NextRequest) {
           FROM products pr
           LEFT JOIN delivery_items di ON di.product_id = pr.id
           LEFT JOIN deliveries d ON di.delivery_id = d.id
-          WHERE d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
+          WHERE pr.organization_id = ${organizationId}
+          AND d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
           GROUP BY pr.id, pr.code, pr.name, pr.molecule, pr.presentation
           ORDER BY total_dispensado DESC
           LIMIT 1000
@@ -475,6 +562,7 @@ export async function GET(request: NextRequest) {
 
                 const traslados = await prisma.transfer.findMany({
                     where: {
+                        organizationId,
                         createdAt: { gte: dateStart, lte: dateEnd }
                     },
                     include: {
@@ -493,6 +581,40 @@ export async function GET(request: NextRequest) {
                     estado: t.status,
                     total_items: t.items.length,
                     observaciones: t.notes || ''
+                }))
+                break
+
+            case 'arqueo_caja':
+                // Arqueo de Caja (Diario)
+                headers = [
+                    'fecha', 'bodega', 'concepto', 'medio_pago', 'cantidad_transacciones', 'total_recaudado'
+                ]
+
+                const arqueo = await prisma.$queryRaw`
+                    SELECT 
+                        DATE(d.delivery_date) as fecha,
+                        w.name as bodega,
+                        COALESCE(d.payment_type, 'CUOTA_MODERADORA') as concepto,
+                        COALESCE(d.payment_method, 'EFECTIVO') as medio_pago,
+                        COUNT(d.id) as transacciones,
+                        SUM(COALESCE(d.payment_amount, d.moderator_fee, 0)) as total
+                    FROM deliveries d
+                    LEFT JOIN warehouses w ON d.warehouse_id = w.id
+                    WHERE d.organization_id = ${organizationId}
+                    AND d.delivery_date >= ${dateStart} AND d.delivery_date <= ${dateEnd}
+                    AND (d.payment_amount > 0 OR d.moderator_fee > 0)
+                    ${warehouseId ? prisma.$queryRaw`AND d.warehouse_id = ${warehouseId}` : prisma.$queryRaw``}
+                    GROUP BY DATE(d.delivery_date), w.name, d.payment_type, d.payment_method
+                    ORDER BY fecha DESC, bodega, concepto
+                ` as any[]
+
+                data = arqueo.map((row: any) => ({
+                    fecha: row.fecha?.toISOString().split('T')[0] || '',
+                    bodega: row.bodega || '',
+                    concepto: row.concepto?.replace('_', ' ') || 'SIN DEFINIR',
+                    medio_pago: row.medio_pago || 'EFECTIVO',
+                    cantidad_transacciones: Number(row.transacciones),
+                    total_recaudado: Number(row.total)
                 }))
                 break
 

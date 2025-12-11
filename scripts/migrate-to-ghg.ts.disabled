@@ -1,0 +1,129 @@
+// Script to migrate data from "Organización Principal" to "GHG" and delete the old org
+import * as dotenv from 'dotenv'
+dotenv.config()
+
+import { Pool } from 'pg'
+import { PrismaPg } from '@prisma/adapter-pg'
+import { PrismaClient } from '../src/generated/prisma/client'
+
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL
+})
+const adapter = new PrismaPg(pool)
+const prisma = new PrismaClient({ adapter })
+
+async function main() {
+    const sourceOrgId = 'cmiynkusx00008m0g0q6u78vo' // Organización Principal (to delete)
+    const targetOrgId = 'cmiwk7e9a000z6b0gixsbzmzx' // GHG (destination)
+
+    console.log('=== Migration: Organización Principal → GHG ===\n')
+
+    // 1. Find warehouses in source org
+    const sourceWarehouses = await prisma.warehouse.findMany({
+        where: { organizationId: sourceOrgId },
+        include: { _count: { select: { inventory: true } } }
+    })
+
+    console.log(`Found ${sourceWarehouses.length} warehouses in "Organización Principal":`)
+    sourceWarehouses.forEach(w => {
+        console.log(`  - ${w.name} (${w._count.inventory} inventory items)`)
+    })
+
+    // 2. Update warehouses to point to GHG
+    const updatedWarehouses = await prisma.warehouse.updateMany({
+        where: { organizationId: sourceOrgId },
+        data: { organizationId: targetOrgId }
+    })
+    console.log(`\n✓ Migrated ${updatedWarehouses.count} warehouses to GHG`)
+
+    // 3. Update any products that belong to the source org
+    const updatedProducts = await prisma.product.updateMany({
+        where: { organizationId: sourceOrgId },
+        data: { organizationId: targetOrgId }
+    })
+    console.log(`✓ Migrated ${updatedProducts.count} products to GHG`)
+
+    // 4. Update any patients that belong to the source org
+    const updatedPatients = await prisma.patient.updateMany({
+        where: { organizationId: sourceOrgId },
+        data: { organizationId: targetOrgId }
+    })
+    console.log(`✓ Migrated ${updatedPatients.count} patients to GHG`)
+
+    // 5. Update any EPS that belong to the source org
+    const updatedEps = await prisma.ePS.updateMany({
+        where: { organizationId: sourceOrgId },
+        data: { organizationId: targetOrgId }
+    })
+    console.log(`✓ Migrated ${updatedEps.count} EPS entities to GHG`)
+
+    // 6. Update any prescriptions that belong to the source org
+    const updatedPrescriptions = await prisma.prescription.updateMany({
+        where: { organizationId: sourceOrgId },
+        data: { organizationId: targetOrgId }
+    })
+    console.log(`✓ Migrated ${updatedPrescriptions.count} prescriptions to GHG`)
+
+    // 7. Update any deliveries that belong to the source org
+    const updatedDeliveries = await prisma.delivery.updateMany({
+        where: { organizationId: sourceOrgId },
+        data: { organizationId: targetOrgId }
+    })
+    console.log(`✓ Migrated ${updatedDeliveries.count} deliveries to GHG`)
+
+    // 8. Transfers are handled through warehouse reassignment (already done above)
+    // Note: The Transfer model references warehouses, which are now reassigned to GHG
+
+    // 9. Update any purchase receipts
+    const updatedReceipts = await prisma.purchaseReceipt.updateMany({
+        where: { organizationId: sourceOrgId },
+        data: { organizationId: targetOrgId }
+    })
+    console.log(`✓ Migrated ${updatedReceipts.count} purchase receipts to GHG`)
+
+    // 10. Update audit logs
+    const updatedAuditLogs = await prisma.auditLog.updateMany({
+        where: { organizationId: sourceOrgId },
+        data: { organizationId: targetOrgId }
+    })
+    console.log(`✓ Migrated ${updatedAuditLogs.count} audit logs to GHG`)
+
+    // 11. Delete memberships from source org (except keep membership record if same user exists in target)
+    const deletedMemberships = await prisma.organizationMember.deleteMany({
+        where: { organizationId: sourceOrgId }
+    })
+    console.log(`✓ Removed ${deletedMemberships.count} memberships from old org`)
+
+    // 12. Delete the source organization
+    await prisma.organization.delete({
+        where: { id: sourceOrgId }
+    })
+    console.log(`\n✓ Deleted "Organización Principal" organization`)
+
+    // Verify final state
+    const ghgOrg = await prisma.organization.findUnique({
+        where: { id: targetOrgId },
+        include: {
+            _count: {
+                select: {
+                    warehouses: true,
+                    products: true,
+                    patients: true,
+                    members: true
+                }
+            }
+        }
+    })
+
+    console.log(`\n=== Final State of GHG ===`)
+    console.log(`Warehouses: ${ghgOrg?._count.warehouses}`)
+    console.log(`Products: ${ghgOrg?._count.products}`)
+    console.log(`Patients: ${ghgOrg?._count.patients}`)
+    console.log(`Members: ${ghgOrg?._count.members}`)
+
+    console.log('\n✅ Migration completed successfully!')
+}
+
+main()
+    .catch(console.error)
+    .finally(() => prisma.$disconnect())

@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  app:
+    container_name: dispenzabot_app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      - db
+    networks:
+      - dispenzabot_network
+
+  db:
+    container_name: dispenzabot_db
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-dispenzabot}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - dispenzabot_network
+
+networks:
+  dispenzabot_network:
+    driver: bridge
+
+volumes:
+  postgres_data:

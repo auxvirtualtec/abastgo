@@ -14,46 +14,124 @@ datasource db {
 // Usuarios y Autenticación
 // ===========================================
 
+// ===========================================
+// Organizaciones y Suscripciones (SaaS)
+// ===========================================
+
+model Organization {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique // URL friendly: app.dispenzabot.com/org-slug
+  logo        String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Billing (Stripe)
+  stripeCustomerId       String?   @unique @map("stripe_customer_id")
+  stripeSubscriptionId   String?   @unique @map("stripe_subscription_id")
+  stripePriceId          String?   @map("stripe_price_id")
+  stripeCurrentPeriodEnd DateTime? @map("stripe_current_period_end")
+
+  // Relaciones
+  members          OrganizationMember[]
+  warehouses       Warehouse[]
+  products         Product[]
+  suppliers        Supplier[]
+  patients         Patient[]
+  purchaseOrders   PurchaseOrder[]
+  prescriptions    Prescription[]
+  deliveries       Delivery[]
+  pendingItems     PendingItem[]
+  transfers        Transfer[]
+  eps              EPS[]
+  auditLogs        AuditLog[]
+  savedReports     SavedReport[]
+  inventoryReturns InventoryReturn[]
+  roles            Role[]
+  permissions      Permission[]
+  quoteRequests    QuoteRequest[]
+
+  @@map("organizations")
+}
+
+enum MemberRole {
+  OWNER      // Dueño de la organización
+  ADMIN      // Administrador - acceso total a sus bodegas
+  OPERATOR   // Operador - solo módulo de inventario
+  DISPENSER  // Dispensador - solo módulo de dispensación
+}
+
+model OrganizationMember {
+  id             String     @id @default(cuid())
+  organizationId String     @map("organization_id")
+  userId         String     @map("user_id")
+  role           MemberRole @default(DISPENSER)
+  createdAt      DateTime   @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@map("organization_members")
+}
+
+// ===========================================
+// Usuarios y Autenticación
+// ===========================================
+
 model User {
   id            String    @id @default(cuid())
   email         String    @unique
-  passwordHash  String    @map("password_hash")
-  name          String
+  passwordHash  String?   @map("password_hash") // Opcional si solo usa OAuth/Magic Link en futuro
+  name          String?
   phone         String?
+  image         String?
   isActive      Boolean   @default(true) @map("is_active")
+  isSuperAdmin  Boolean   @default(false) @map("is_super_admin") // Platform Super Admin
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  // Relaciones
-  roles          UserRole[]
-  warehouseUsers WarehouseUser[]
-  deliveries     Delivery[]       @relation("DeliveredBy")
-  auditLogs      AuditLog[]
+  // Relaciones Globales
+  memberships      OrganizationMember[]
+  
+  // Relaciones (Legado/Directas - A revisar si se mueven a OrganizationMember)
+  // Por compatibilidad mantenemos estas pero idealmente el acceso es via OrganizationMember -> Role
+  deliveries       Delivery[]        @relation("DeliveredBy")
+  auditLogs        AuditLog[]
+  inventoryReturns InventoryReturn[] @relation("ReturnCreatedBy")
+  
+  // Deprecated for SaaS (Moved to Organization/Role context)
+  roles            UserRole[]
+  warehouseUsers   WarehouseUser[]
 
   @@map("users")
 }
 
 model Role {
-  id          String   @id @default(cuid())
-  name        String   @unique
-  description String?
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id") // Roles son por organización
+  name           String
+  description    String?
 
-  // Relaciones
-  users       UserRole[]
-  permissions RolePermission[]
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  users          UserRole[]
+  permissions    RolePermission[]
 
+  @@unique([organizationId, name]) // Rol único por org
   @@map("roles")
 }
 
 model Permission {
-  id          String   @id @default(cuid())
-  code        String   @unique  // ej: "inventory.create", "patients.view"
-  module      String              // ej: "inventory", "patients"
-  description String?
+  id             String   @id @default(cuid())
+  organizationId String?  @map("organization_id") // Null = Permiso Sistema Global, ID = Custom
+  code           String   // ej: "inventory.create"
+  module         String   // ej: "inventory"
+  description    String?
 
-  // Relaciones
-  roles       RolePermission[]
-
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  roles          RolePermission[]
+  
+  @@unique([organizationId, code])
   @@map("permissions")
 }
 
@@ -89,23 +167,29 @@ enum WarehouseType {
 }
 
 model Warehouse {
-  id       String        @id @default(cuid())
-  code     String        @unique
-  name     String
-  type     WarehouseType
-  address  String?
-  city     String?
-  isActive Boolean       @default(true) @map("is_active")
+  id             String        @id @default(cuid())
+  organizationId String        @map("organization_id")
+  epsId          String?       @map("eps_id") // Opcional: Si es null, es bodega general/compartida
+  code           String
+  name           String
+  type           WarehouseType
+  address        String?
+  city           String?
+  phone          String?
+  isActive       Boolean       @default(true) @map("is_active")
 
-  // Relaciones
-  users           WarehouseUser[]
-  inventory       Inventory[]
-  transfersFrom   Transfer[]        @relation("TransferFrom")
-  transfersTo     Transfer[]        @relation("TransferTo")
-  deliveries      Delivery[]
-  pendingItems    PendingItem[]
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  eps              EPS?         @relation(fields: [epsId], references: [id])
+  users            WarehouseUser[]
+  inventory        Inventory[]
+  transfersFrom    Transfer[]        @relation("TransferFrom")
+  transfersTo      Transfer[]        @relation("TransferTo")
+  deliveries       Delivery[]
+  pendingItems     PendingItem[]
   purchaseReceipts PurchaseReceipt[]
+  inventoryReturns InventoryReturn[]
 
+  @@unique([organizationId, code]) // Código único por organización
   @@map("warehouses")
 }
 
@@ -125,41 +209,55 @@ model WarehouseUser {
 // ===========================================
 
 model Supplier {
-  id        String   @id @default(cuid())
-  code      String   @unique
-  name      String
-  nit       String?
-  address   String?
-  phone     String?
-  email     String?
-  isActive  Boolean  @default(true) @map("is_active")
+  id               String   @id @default(cuid())
+  organizationId   String   @map("organization_id")
+  code             String
+  name             String
+  nit              String?
+  address          String?
+  phone            String?
+  email            String?
+  whatsapp         String?
+  website          String?
+  apiEndpoint      String?  @map("api_endpoint")
+  apiKey           String?  @map("api_key")
+  preferredContact String?  @map("preferred_contact") // email, whatsapp, api
+  isExternal       Boolean  @default(false) @map("is_external") // Encontrado por bot
+  isActive         Boolean  @default(true) @map("is_active")
 
-  // Relaciones
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   purchaseOrders PurchaseOrder[]
+  quotes         Quote[]
+  score          SupplierScore?
 
+  @@unique([organizationId, code])
   @@map("suppliers")
 }
 
 model Product {
-  id            String   @id @default(cuid())
-  code          String   @unique
-  barcode       String?
-  name          String
-  molecule      String?    // Principio activo
-  presentation  String?    // Tabletas, Jarabe, etc.
-  concentration String?    // 500mg, 10ml, etc.
-  unit          String?    // Unidad, Caja, Frasco
-  price         Decimal  @db.Decimal(10, 2)
-  minStock      Int      @default(0) @map("min_stock")
-  isActive      Boolean  @default(true) @map("is_active")
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  code           String
+  barcode        String?
+  name           String
+  molecule       String?    // Principio activo
+  presentation   String?    // Tabletas, Jarabe, etc.
+  concentration  String?    // 500mg, 10ml, etc.
+  unit           String?    // Unidad, Caja, Frasco
+  price          Decimal  @db.Decimal(10, 2)
+  minStock       Int      @default(0) @map("min_stock")
+  isActive       Boolean  @default(true) @map("is_active")
 
-  // Relaciones
-  inventory           Inventory[]
-  purchaseOrderItems  PurchaseOrderItem[]
-  transferItems       TransferItem[]
-  prescriptionItems   PrescriptionItem[]
-  deliveryItems       DeliveryItem[]
+  organization         Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  inventory            Inventory[]
+  purchaseOrderItems   PurchaseOrderItem[]
+  transferItems        TransferItem[]
+  prescriptionItems    PrescriptionItem[]
+  deliveryItems        DeliveryItem[]
+  inventoryReturnItems InventoryReturnItem[]
+  quoteRequestItems    QuoteRequestItem[]
 
+  @@unique([organizationId, code])
   @@map("products")
 }
 
@@ -175,18 +273,21 @@ enum PurchaseOrderStatus {
 }
 
 model PurchaseOrder {
-  id           String              @id @default(cuid())
-  orderNumber  String              @unique @map("order_number")
-  supplierId   String              @map("supplier_id")
-  orderDate    DateTime            @default(now()) @map("order_date")
-  status       PurchaseOrderStatus @default(PENDING)
-  notes        String?
-  createdAt    DateTime            @default(now()) @map("created_at")
+  id             String              @id @default(cuid())
+  organizationId String              @map("organization_id")
+  orderNumber    String              @map("order_number")
+  supplierId     String              @map("supplier_id")
+  orderDate      DateTime            @default(now()) @map("order_date")
+  status         PurchaseOrderStatus @default(PENDING)
+  notes          String?
+  createdAt      DateTime            @default(now()) @map("created_at")
 
-  supplier Supplier            @relation(fields: [supplierId], references: [id])
-  items    PurchaseOrderItem[]
-  receipts PurchaseReceipt[]
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  supplier     Supplier            @relation(fields: [supplierId], references: [id])
+  items        PurchaseOrderItem[]
+  receipts     PurchaseReceipt[]
 
+  @@unique([organizationId, orderNumber])
   @@map("purchase_orders")
 }
 
@@ -261,7 +362,8 @@ enum TransferStatus {
 
 model Transfer {
   id             String         @id @default(cuid())
-  transferNumber String         @unique @map("transfer_number")
+  organizationId String         @map("organization_id")
+  transferNumber String         @map("transfer_number")
   fromWarehouseId String        @map("from_warehouse_id")
   toWarehouseId   String        @map("to_warehouse_id")
   status          TransferStatus @default(PENDING)
@@ -269,10 +371,12 @@ model Transfer {
   receivedAt      DateTime?      @map("received_at")
   notes           String?
 
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   fromWarehouse Warehouse      @relation("TransferFrom", fields: [fromWarehouseId], references: [id])
   toWarehouse   Warehouse      @relation("TransferTo", fields: [toWarehouseId], references: [id])
   items         TransferItem[]
 
+  @@unique([organizationId, transferNumber])
   @@map("transfers")
 }
 
@@ -294,33 +398,37 @@ model TransferItem {
 // ===========================================
 
 model EPS {
-  id          String  @id @default(cuid())
-  code        String  @unique
-  name        String
-  hasApi      Boolean @default(false) @map("has_api")
-  apiEndpoint String? @map("api_endpoint")
-  isActive    Boolean @default(true) @map("is_active")
+  id             String  @id @default(cuid())
+  organizationId String  @map("organization_id")
+  code           String
+  name           String
+  hasApi         Boolean @default(false) @map("has_api")
+  apiEndpoint    String? @map("api_endpoint")
+  isActive       Boolean @default(true) @map("is_active")
 
-  // Relaciones
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   patientContracts PatientContract[]
   prescriptions    Prescription[]
+  warehouses       Warehouse[]
 
+  @@unique([organizationId, code])
   @@map("eps")
 }
 
 enum DocumentType {
-  CC  // Cédula de ciudadanía
-  TI  // Tarjeta de identidad
-  CE  // Cédula de extranjería
-  PA  // Pasaporte
-  RC  // Registro civil
-  NU  // NUIP
-  AS  // Adulto sin identificación
-  MS  // Menor sin identificación
+  CC
+  TI
+  CE
+  PA
+  RC
+  NU
+  AS
+  MS
 }
 
 model Patient {
   id             String       @id @default(cuid())
+  organizationId String       @map("organization_id")
   documentType   DocumentType @map("document_type")
   documentNumber String       @map("document_number")
   name           String
@@ -328,15 +436,15 @@ model Patient {
   address        String?
   city           String?
   diagnosis      String?
-  documentPhotoPath String?   @map("document_photo_path") // Foto de cédula
-  documentPhotoDate DateTime? @map("document_photo_date") // Fecha de captura
+  documentPhotoPath String?   @map("document_photo_path")
+  documentPhotoDate DateTime? @map("document_photo_date")
   createdAt      DateTime     @default(now()) @map("created_at")
 
-  // Relaciones
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   contracts     PatientContract[]
   prescriptions Prescription[]
 
-  @@unique([documentType, documentNumber])
+  @@unique([organizationId, documentType, documentNumber])
   @@map("patients")
 }
 
@@ -344,8 +452,8 @@ model PatientContract {
   id           String   @id @default(cuid())
   patientId    String   @map("patient_id")
   epsId        String   @map("eps_id")
-  affiliationType String @map("affiliation_type") // COTIZANTE, BENEFICIARIO
-  regime       String?  // CONTRIBUTIVO, SUBSIDIADO
+  affiliationType String @map("affiliation_type") 
+  regime       String?  
   startDate    DateTime @map("start_date")
   endDate      DateTime? @map("end_date")
   isActive     Boolean  @default(true) @map("is_active")
@@ -361,14 +469,15 @@ model PatientContract {
 // ===========================================
 
 enum PrescriptionStatus {
-  PENDING     // Pendiente de entrega
-  PARTIAL     // Entrega parcial
-  DELIVERED   // Entregada completamente
-  CANCELLED   // Cancelada
+  PENDING
+  PARTIAL
+  DELIVERED
+  CANCELLED
 }
 
 model Prescription {
   id                 String             @id @default(cuid())
+  organizationId     String             @map("organization_id")
   patientId          String             @map("patient_id")
   epsId              String             @map("eps_id")
   prescriptionNumber String             @map("prescription_number")
@@ -378,6 +487,7 @@ model Prescription {
   status             PrescriptionStatus @default(PENDING)
   createdAt          DateTime           @default(now()) @map("created_at")
 
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   patient   Patient            @relation(fields: [patientId], references: [id])
   eps       EPS                @relation(fields: [epsId], references: [id])
   items     PrescriptionItem[]
@@ -409,6 +519,7 @@ enum DeliveryStatus {
 
 model Delivery {
   id             String         @id @default(cuid())
+  organizationId String         @map("organization_id")
   prescriptionId String         @map("prescription_id")
   warehouseId    String         @map("warehouse_id")
   deliveredById  String         @map("delivered_by")
@@ -419,15 +530,22 @@ model Delivery {
   notes          String?
   
   // Documentos de trazabilidad
-  prescriptionPhotoPath  String?  @map("prescription_photo_path")  // Foto de receta/fórmula
-  deliverySignaturePath  String?  @map("delivery_signature_path")  // Firma de entrega
-  isAuthorizedPickup     Boolean  @default(false) @map("is_authorized_pickup") // Si recoge persona autorizada
-  authorizedPersonName   String?  @map("authorized_person_name")   // Nombre persona autorizada
-  authorizedPersonDoc    String?  @map("authorized_person_doc")    // Documento persona autorizada
-  authorizedDocPhotoPath String?  @map("authorized_doc_photo_path") // Foto documento autorizado
-  authorizationLetterPath String? @map("authorization_letter_path") // Foto carta autorización
-  pendingDeliveryLetterPath String? @map("pending_delivery_letter_path") // Carta pendientes firmada
+  prescriptionPhotoPath  String?  @map("prescription_photo_path") 
+  deliverySignaturePath  String?  @map("delivery_signature_path") 
+  isAuthorizedPickup     Boolean  @default(false) @map("is_authorized_pickup")
+  authorizedPersonName   String?  @map("authorized_person_name")
+  authorizedPersonDoc    String?  @map("authorized_person_doc")
+  authorizedDocPhotoPath String?  @map("authorized_doc_photo_path")
+  authorizationLetterPath String? @map("authorization_letter_path")
+  pendingDeliveryLetterPath String? @map("pending_delivery_letter_path")
 
+  // Pagos y Copagos
+  paymentType   String?         @map("payment_type") 
+  paymentMethod String?         @map("payment_method")
+  paymentAmount Decimal?        @map("payment_amount") @db.Decimal(10, 2)
+
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   prescription Prescription   @relation(fields: [prescriptionId], references: [id])
   warehouse    Warehouse      @relation(fields: [warehouseId], references: [id])
   deliveredBy  User           @relation("DeliveredBy", fields: [deliveredById], references: [id])
@@ -454,15 +572,16 @@ model DeliveryItem {
 // ===========================================
 
 enum PendingStatus {
-  PENDING    // Pendiente
-  NOTIFIED   // Notificado al paciente
-  SHIPPED    // Enviado desde bodega
-  DELIVERED  // Entregado
-  CANCELLED  // Cancelado
+  PENDING
+  NOTIFIED
+  SHIPPED
+  DELIVERED
+  CANCELLED
 }
 
 model PendingItem {
   id                  String        @id @default(cuid())
+  organizationId      String        @map("organization_id")
   prescriptionItemId  String        @map("prescription_item_id")
   warehouseId         String        @map("warehouse_id")
   quantity            Int
@@ -470,6 +589,7 @@ model PendingItem {
   notifiedAt          DateTime?     @map("notified_at")
   createdAt           DateTime      @default(now()) @map("created_at")
 
+  organization     Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   prescriptionItem PrescriptionItem @relation(fields: [prescriptionItemId], references: [id])
   warehouse        Warehouse        @relation(fields: [warehouseId], references: [id])
 
@@ -481,16 +601,18 @@ model PendingItem {
 // ===========================================
 
 model AuditLog {
-  id        String   @id @default(cuid())
-  userId    String?  @map("user_id")
-  action    String   // CREATE, UPDATE, DELETE
-  entity    String   // Nombre de la tabla
-  entityId  String   @map("entity_id")
-  oldValues Json?    @map("old_values")
-  newValues Json?    @map("new_values")
-  createdAt DateTime @default(now()) @map("created_at")
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  userId         String?  @map("user_id")
+  action         String   // CREATE, UPDATE, DELETE
+  entity         String   // Nombre de la tabla
+  entityId       String   @map("entity_id")
+  oldValues      Json?    @map("old_values")
+  newValues      Json?    @map("new_values")
+  createdAt      DateTime @default(now()) @map("created_at")
 
-  user User? @relation(fields: [userId], references: [id])
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id])
 
   @@map("audit_logs")
 }
@@ -500,18 +622,206 @@ model AuditLog {
 // ===========================================
 
 model SavedReport {
-  id          String   @id @default(cuid())
-  userId      String   @map("user_id")
-  name        String
-  description String?
-  type        String   // 'favorite' | 'custom'
-  reportType  String?  @map("report_type") // Para favoritos: tipo del reporte estándar
-  query       String?  // Para personalizados: la consulta en lenguaje natural
-  sqlQuery    String?  @map("sql_query") // Query SQL generada por IA
-  filters     Json?    // Filtros guardados (fechas, bodega, etc.)
-  isFavorite  Boolean  @default(false) @map("is_favorite")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  userId         String   @map("user_id")
+  name           String
+  description    String?
+  type           String   // 'favorite' | 'custom'
+  reportType     String?  @map("report_type") 
+  query          String?  
+  sqlQuery       String?  @map("sql_query")
+  filters        Json?    
+  isFavorite     Boolean  @default(false) @map("is_favorite")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@map("saved_reports")
 }
+
+// ===========================================
+// Devoluciones de Inventario
+// ===========================================
+
+model InventoryReturn {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  returnNumber   String   @map("return_number")
+  warehouseId    String   @map("warehouse_id")
+  reason         String   
+  notes          String?
+  status         String   @default("PENDING")
+  returnDate     DateTime @default(now()) @map("return_date")
+  createdById    String?  @map("created_by_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  warehouse  Warehouse              @relation(fields: [warehouseId], references: [id])
+  createdBy  User?                  @relation("ReturnCreatedBy", fields: [createdById], references: [id])
+  items      InventoryReturnItem[]
+
+  @@unique([organizationId, returnNumber])
+  @@map("inventory_returns")
+}
+
+model InventoryReturnItem {
+  id           String    @id @default(cuid())
+  returnId     String    @map("return_id")
+  productId    String    @map("product_id")
+  lotNumber    String?   @map("lot_number")
+  expiryDate   DateTime? @map("expiry_date")
+  quantity     Int
+
+  return   InventoryReturn @relation(fields: [returnId], references: [id])
+  product  Product         @relation(fields: [productId], references: [id])
+
+  @@map("inventory_return_items")
+}
+
+// ===========================================
+// Catálogo INVIMA (Medicamentos Aprobados)
+// ===========================================
+
+model InvimaDrug {
+  id                  String    @id @default(cuid())
+  cum                 String    @unique // Código Único de Medicamento
+  expediente          String?
+  producto            String
+  titular             String?
+  registroSanitario   String?   @map("registro_sanitario")
+  fechaExpedicion     DateTime? @map("fecha_expedicion")
+  fechaVencimiento    DateTime? @map("fecha_vencimiento")
+  estadoRegistro      String?   @map("estado_registro")
+  consecutivoCum      String?   @map("consecutivo_cum")
+  cantidadCum         String?   @map("cantidad_cum")
+  descripcionComercial String?  @map("descripcion_comercial")
+  estadoCum           String?   @map("estado_cum") // Activo/Inactivo
+  fechaActivo         DateTime? @map("fecha_activo")
+  fechaInactivo       DateTime? @map("fecha_inactivo")
+  muestraMedica       Boolean   @default(false) @map("muestra_medica")
+  unidad              String?
+  atc                 String?   // Código ATC
+  descripcionAtc      String?   @map("descripcion_atc")
+  viaAdministracion   String?   @map("via_administracion")
+  concentracion       String?
+  principioActivo     String?   @map("principio_activo")
+  unidadMedida        String?   @map("unidad_medida")
+  cantidad            String?
+  unidadReferencia    String?   @map("unidad_referencia")
+  formaFarmaceutica   String?   @map("forma_farmaceutica")
+  nombreRol           String?   @map("nombre_rol") // Fabricante/Importador
+  tipoRol             String?   @map("tipo_rol")
+  modalidad           String?
+  ium                 String?   // Identificador Único de Medicamento
+
+  quoteRequestItems   QuoteRequestItem[]
+
+  @@index([producto])
+  @@index([principioActivo])
+  @@index([atc])
+  @@index([estadoCum])
+  @@map("invima_drugs")
+}
+
+// ===========================================
+// Sistema de Scoring de Proveedores
+// ===========================================
+
+model SupplierScore {
+  id               String   @id @default(cuid())
+  supplierId       String   @unique @map("supplier_id")
+  
+  // Métricas (0-100)
+  priceScore       Int      @default(0) @map("price_score")     // Competitividad de precios
+  deliveryScore    Int      @default(0) @map("delivery_score")  // Cumplimiento entregas
+  paymentScore     Int      @default(0) @map("payment_score")   // Facilidades de pago
+  discountScore    Int      @default(0) @map("discount_score")  // Descuentos ofrecidos
+  qualityScore     Int      @default(0) @map("quality_score")   // Calidad productos
+  trackingScore    Int      @default(0) @map("tracking_score")  // Seguimiento/comunicación
+  
+  overallScore     Int      @default(0) @map("overall_score")   // Score calculado
+  totalOrders      Int      @default(0) @map("total_orders")
+  onTimeDeliveries Int      @default(0) @map("on_time_deliveries")
+  
+  lastUpdated      DateTime @updatedAt @map("last_updated")
+  
+  supplier         Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  
+  @@map("supplier_scores")
+}
+
+// ===========================================
+// Solicitudes de Cotización y Cotizaciones
+// ===========================================
+
+model QuoteRequest {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  requestNumber  String   @map("request_number")
+  status         String   @default("PENDING") // PENDING, SENT, PARTIAL, COMPLETED, CANCELLED
+  notes          String?
+  dueDate        DateTime? @map("due_date")
+  createdAt      DateTime @default(now()) @map("created_at")
+  
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  items          QuoteRequestItem[]
+  quotes         Quote[]
+
+  @@unique([organizationId, requestNumber])
+  @@map("quote_requests")
+}
+
+model QuoteRequestItem {
+  id             String  @id @default(cuid())
+  quoteRequestId String  @map("quote_request_id")
+  productId      String? @map("product_id")      // Producto de la org (opcional)
+  invimaDrugId   String? @map("invima_drug_id")  // Referencia INVIMA
+  description    String                          // Descripción libre
+  quantity       Int
+
+  quoteRequest   QuoteRequest  @relation(fields: [quoteRequestId], references: [id], onDelete: Cascade)
+  product        Product?      @relation(fields: [productId], references: [id])
+  invimaDrug     InvimaDrug?   @relation(fields: [invimaDrugId], references: [id])
+  quoteItems     QuoteItem[]
+
+  @@map("quote_request_items")
+}
+
+model Quote {
+  id             String    @id @default(cuid())
+  quoteRequestId String    @map("quote_request_id")
+  supplierId     String    @map("supplier_id")
+  quoteNumber    String?   @map("quote_number")
+  receivedAt     DateTime  @default(now()) @map("received_at")
+  validUntil     DateTime? @map("valid_until")
+  totalAmount    Decimal   @db.Decimal(12, 2) @map("total_amount")
+  deliveryDays   Int?      @map("delivery_days")
+  paymentTerms   String?   @map("payment_terms") // Términos de pago ofrecidos
+  discount       Decimal?  @db.Decimal(5, 2) // Porcentaje de descuento
+  notes          String?
+  isSelected     Boolean   @default(false) @map("is_selected")
+
+  quoteRequest   QuoteRequest @relation(fields: [quoteRequestId], references: [id], onDelete: Cascade)
+  supplier       Supplier     @relation(fields: [supplierId], references: [id])
+  items          QuoteItem[]
+
+  @@map("quotes")
+}
+
+model QuoteItem {
+  id                 String  @id @default(cuid())
+  quoteId            String  @map("quote_id")
+  quoteRequestItemId String  @map("quote_request_item_id")
+  unitPrice          Decimal @db.Decimal(10, 2) @map("unit_price")
+  quantity           Int
+  available          Boolean @default(true)
+  notes              String?
+
+  quote            Quote            @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  quoteRequestItem QuoteRequestItem @relation(fields: [quoteRequestItemId], references: [id])
+
+  @@map("quote_items")
+}
+

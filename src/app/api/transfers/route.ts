@@ -1,27 +1,59 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 
+import { getServerSession } from "next-auth"
+import { authOptions } from "@/lib/auth"
+
 // GET - Listar traslados
 export async function GET(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        if (!session?.user?.organizationId) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
+        const organizationId = session.user.organizationId
+        const orgRole = session.user.orgRole
+        const userWarehouseIds = session.user.warehouseIds || []
+
         const { searchParams } = new URL(request.url)
         const status = searchParams.get('status')
         const fromWarehouseId = searchParams.get('fromWarehouseId')
         const toWarehouseId = searchParams.get('toWarehouseId')
         const limit = parseInt(searchParams.get('limit') || '50')
 
-        const whereClause: any = {}
+        const whereClause: any = { organizationId }
+
+        // Filtrar por bodegas asignadas al usuario (solo para OPERATOR/DISPENSER)
+        const isRestrictedRole = orgRole === 'OPERATOR' || orgRole === 'DISPENSER'
+        if (isRestrictedRole && userWarehouseIds.length > 0) {
+            // Ver traslados donde origen O destino es una de sus bodegas
+            whereClause.OR = [
+                { fromWarehouseId: { in: userWarehouseIds } },
+                { toWarehouseId: { in: userWarehouseIds } }
+            ]
+        } else if (isRestrictedRole && userWarehouseIds.length === 0) {
+            return NextResponse.json({ transfers: [] })
+        }
 
         if (status) whereClause.status = status
-        if (fromWarehouseId) whereClause.fromWarehouseId = fromWarehouseId
-        if (toWarehouseId) whereClause.toWarehouseId = toWarehouseId
+        if (fromWarehouseId) {
+            if (isRestrictedRole && !userWarehouseIds.includes(fromWarehouseId)) {
+                return NextResponse.json({ error: 'No tiene acceso a esta bodega' }, { status: 403 })
+            }
+            whereClause.fromWarehouseId = fromWarehouseId
+        }
+        if (toWarehouseId) {
+            if (isRestrictedRole && !userWarehouseIds.includes(toWarehouseId)) {
+                return NextResponse.json({ error: 'No tiene acceso a esta bodega' }, { status: 403 })
+            }
+            whereClause.toWarehouseId = toWarehouseId
+        }
 
         const transfers = await prisma.transfer.findMany({
             where: whereClause,
             include: {
                 fromWarehouse: true,
                 toWarehouse: true,
-                createdBy: { select: { name: true, email: true } },
                 items: {
                     include: { product: true }
                 }
@@ -43,6 +75,13 @@ export async function GET(request: NextRequest) {
 // POST - Crear nuevo traslado
 export async function POST(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        const organizationId = session?.user?.organizationId
+
+        if (!organizationId) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
+
         const body = await request.json()
         const {
             fromWarehouseId,
@@ -65,6 +104,19 @@ export async function POST(request: NextRequest) {
             )
         }
 
+        // Verify warehouses belong to organization
+        const [fromWh, toWh] = await Promise.all([
+            prisma.warehouse.findUnique({ where: { id: fromWarehouseId } }),
+            prisma.warehouse.findUnique({ where: { id: toWarehouseId } })
+        ])
+
+        if (!fromWh || fromWh.organizationId !== organizationId || !toWh || toWh.organizationId !== organizationId) {
+            return NextResponse.json(
+                { error: 'Bodegas no válidas o no pertenecen a la organización' },
+                { status: 400 }
+            )
+        }
+
         // Verificar inventario disponible
         for (const item of items) {
             const inventory = await prisma.inventory.findUnique({
@@ -80,15 +132,15 @@ export async function POST(request: NextRequest) {
         }
 
         // Crear traslado
-        const firstUser = await prisma.user.findFirst()
         const transferNumber = `TR-${Date.now()}`
 
         const transfer = await prisma.transfer.create({
             data: {
+                organizationId,
                 transferNumber,
                 fromWarehouseId,
                 toWarehouseId,
-                createdById: firstUser?.id || '',
+
                 status: 'PENDING',
                 notes,
                 items: {
@@ -119,6 +171,13 @@ export async function POST(request: NextRequest) {
 // PATCH - Actualizar estado del traslado
 export async function PATCH(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        const organizationId = session?.user?.organizationId
+
+        if (!organizationId) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
+
         const body = await request.json()
         const { transferId, action, notes } = body
 
@@ -134,7 +193,7 @@ export async function PATCH(request: NextRequest) {
             include: { items: true }
         })
 
-        if (!transfer) {
+        if (!transfer || transfer.organizationId !== organizationId) {
             return NextResponse.json(
                 { error: 'Traslado no encontrado' },
                 { status: 404 }
@@ -142,7 +201,7 @@ export async function PATCH(request: NextRequest) {
         }
 
         let newStatus: string
-        const firstUser = await prisma.user.findFirst()
+
 
         switch (action) {
             case 'SEND': // Enviar (descontar de origen)
@@ -230,7 +289,7 @@ export async function PATCH(request: NextRequest) {
                                 lotNumber: item.lotNumber || undefined
                             },
                             data: {
-                                quantity: { increment: item.quantity }
+                                quantity: { decrement: item.quantity }
                             }
                         })
                     }
@@ -250,7 +309,7 @@ export async function PATCH(request: NextRequest) {
             where: { id: transferId },
             data: {
                 status: newStatus as any,
-                receivedById: action === 'RECEIVE' ? firstUser?.id : undefined,
+
                 receivedAt: action === 'RECEIVE' ? new Date() : undefined,
                 notes: notes ? `${transfer.notes || ''}\n${notes}` : transfer.notes
             },

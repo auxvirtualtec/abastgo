@@ -1,40 +1,76 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 
+import { getServerSession } from "next-auth"
+import { authOptions } from "@/lib/auth"
+
 // GET - Listar productos
 export async function GET(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        if (!session?.user?.organizationId) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
+        const organizationId = session.user.organizationId
+
         const { searchParams } = new URL(request.url)
         const search = searchParams.get('search')
         const isActive = searchParams.get('isActive')
         const limit = parseInt(searchParams.get('limit') || '100')
         const offset = parseInt(searchParams.get('offset') || '0')
 
-        const whereClause: any = {}
+        const whereClause: any = { organizationId }
 
         if (search) {
-            whereClause.OR = [
-                { code: { contains: search, mode: 'insensitive' } },
-                { name: { contains: search, mode: 'insensitive' } },
-                { molecule: { contains: search, mode: 'insensitive' } }
+            whereClause.AND = [
+                { organizationId },
+                {
+                    OR: [
+                        { code: { contains: search, mode: 'insensitive' } },
+                        { name: { contains: search, mode: 'insensitive' } },
+                        { molecule: { contains: search, mode: 'insensitive' } },
+                        { barcode: { contains: search, mode: 'insensitive' } }
+                    ]
+                }
             ]
         }
 
-        if (isActive !== null && isActive !== undefined) {
+        if (isActive !== null && isActive !== undefined && isActive !== '') {
             whereClause.isActive = isActive === 'true'
         }
 
-        const [products, total] = await Promise.all([
+        const [products, count, totalParams] = await Promise.all([
             prisma.product.findMany({
                 where: whereClause,
                 orderBy: { name: 'asc' },
                 take: limit,
                 skip: offset
             }),
-            prisma.product.count({ where: whereClause })
+            prisma.product.count({ where: whereClause }),
+            prisma.product.groupBy({
+                by: ['isActive'],
+                where: { organizationId },
+                _count: { id: true }
+            })
         ])
 
-        return NextResponse.json({ products, total })
+        const stats = {
+            total: totalParams.reduce((acc, curr) => acc + curr._count.id, 0),
+            active: totalParams.find(p => p.isActive)?._count.id || 0,
+            inactive: totalParams.find(p => !p.isActive)?._count.id || 0,
+            lowStock: 0
+        }
+
+        // Count low stock
+        stats.lowStock = await prisma.product.count({
+            where: {
+                organizationId,
+                isActive: true,
+                minStock: { gt: 0 }
+            }
+        })
+
+        return NextResponse.json({ products, total: count, stats })
     } catch (error) {
         console.error('Error listando productos:', error)
         return NextResponse.json(
@@ -47,19 +83,24 @@ export async function GET(request: NextRequest) {
 // POST - Crear producto
 export async function POST(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        const organizationId = session?.user?.organizationId
+
+        if (!organizationId) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
+
         const body = await request.json()
         const {
             code,
+            barcode,
             name,
             molecule,
             presentation,
             concentration,
-            laboratory,
+            unit,
             price,
-            requiresPrescription,
-            isControlled,
-            minStock,
-            maxStock
+            minStock
         } = body
 
         if (!code || !name) {
@@ -69,28 +110,34 @@ export async function POST(request: NextRequest) {
             )
         }
 
-        // Verificar código único
-        const existing = await prisma.product.findUnique({ where: { code } })
+        // Verificar código único dentro de la organización
+        const existing = await prisma.product.findUnique({
+            where: {
+                organizationId_code: {
+                    organizationId,
+                    code
+                }
+            }
+        })
         if (existing) {
             return NextResponse.json(
-                { error: 'Ya existe un producto con ese código' },
+                { error: 'Ya existe un producto con ese código en esta organización' },
                 { status: 400 }
             )
         }
 
         const product = await prisma.product.create({
             data: {
+                organizationId,
                 code,
+                barcode,
                 name,
                 molecule,
                 presentation,
                 concentration,
-                laboratory,
+                unit,
                 price: price || 0,
-                requiresPrescription: requiresPrescription ?? true,
-                isControlled: isControlled ?? false,
-                minStock,
-                maxStock,
+                minStock: minStock || 0,
                 isActive: true
             }
         })
@@ -108,8 +155,14 @@ export async function POST(request: NextRequest) {
 // PUT - Actualizar producto
 export async function PUT(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        if (!session?.user?.organizationId) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
+        const organizationId = session.user.organizationId
+
         const body = await request.json()
-        const { id, ...data } = body
+        const { id, code, barcode, name, molecule, presentation, concentration, unit, price, minStock, isActive } = body
 
         if (!id) {
             return NextResponse.json(
@@ -118,9 +171,48 @@ export async function PUT(request: NextRequest) {
             )
         }
 
+        // Verify product owner
+        const existingProduct = await prisma.product.findUnique({ where: { id } })
+        if (!existingProduct || existingProduct.organizationId !== organizationId) {
+            return NextResponse.json(
+                { error: 'Producto no encontrado' },
+                { status: 404 }
+            )
+        }
+
+        // Si se cambia el código, verificar que no exista
+        if (code && code !== existingProduct.code) {
+            const duplicate = await prisma.product.findUnique({
+                where: {
+                    organizationId_code: {
+                        organizationId,
+                        code
+                    }
+                }
+            })
+            if (duplicate) {
+                return NextResponse.json(
+                    { error: 'Ya existe otro producto con ese código' },
+                    { status: 400 }
+                )
+            }
+        }
+
+        // Use updateMany to ensure security or simple update since we checked
         const product = await prisma.product.update({
             where: { id },
-            data
+            data: {
+                ...(code && { code }),
+                ...(barcode !== undefined && { barcode }),
+                ...(name && { name }),
+                ...(molecule !== undefined && { molecule }),
+                ...(presentation !== undefined && { presentation }),
+                ...(concentration !== undefined && { concentration }),
+                ...(unit !== undefined && { unit }),
+                ...(price !== undefined && { price }),
+                ...(minStock !== undefined && { minStock }),
+                ...(isActive !== undefined && { isActive })
+            }
         })
 
         return NextResponse.json({ success: true, product })
@@ -133,9 +225,15 @@ export async function PUT(request: NextRequest) {
     }
 }
 
-// DELETE - Desactivar producto
+// DELETE - Desactivar producto (soft delete)
 export async function DELETE(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        if (!session?.user?.organizationId) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
+        const organizationId = session.user.organizationId
+
         const { searchParams } = new URL(request.url)
         const id = searchParams.get('id')
 
@@ -143,6 +241,15 @@ export async function DELETE(request: NextRequest) {
             return NextResponse.json(
                 { error: 'id es requerido' },
                 { status: 400 }
+            )
+        }
+
+        // Verify product owner
+        const existingProduct = await prisma.product.findUnique({ where: { id } })
+        if (!existingProduct || existingProduct.organizationId !== organizationId) {
+            return NextResponse.json(
+                { error: 'Producto no encontrado' },
+                { status: 404 }
             )
         }
 

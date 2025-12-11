@@ -1,10 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 
+import { getServerSession } from "next-auth"
+import { authOptions } from "@/lib/auth"
+
 // GET - Listar roles con permisos
-export async function GET() {
+export async function GET(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        if (!session?.user?.organizationId) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
+        const organizationId = session.user.organizationId
+
         const roles = await prisma.role.findMany({
+            where: { organizationId },
             include: {
                 permissions: {
                     include: { permission: true }
@@ -27,7 +37,7 @@ export async function GET() {
             usersCount: r._count.users
         }))
 
-        // También obtener todos los permisos disponibles
+        // También obtener todos los permisos disponibles (Globales del sistema)
         const permissions = await prisma.permission.findMany({
             orderBy: [{ module: 'asc' }, { code: 'asc' }]
         })
@@ -45,6 +55,13 @@ export async function GET() {
 // POST - Crear rol
 export async function POST(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        const organizationId = session?.user?.organizationId
+
+        if (!organizationId) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
+
         const body = await request.json()
         const { name, description, permissionIds } = body
 
@@ -57,6 +74,7 @@ export async function POST(request: NextRequest) {
 
         const role = await prisma.role.create({
             data: {
+                organizationId,
                 name,
                 description,
                 permissions: {
@@ -78,6 +96,13 @@ export async function POST(request: NextRequest) {
 // PUT - Actualizar rol
 export async function PUT(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        const organizationId = session?.user?.organizationId
+
+        if (!organizationId) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
+
         const body = await request.json()
         const { id, name, description, permissionIds } = body
 
@@ -85,6 +110,15 @@ export async function PUT(request: NextRequest) {
             return NextResponse.json(
                 { error: 'ID de rol requerido' },
                 { status: 400 }
+            )
+        }
+
+        // Verify ownership
+        const existingRole = await prisma.role.findUnique({ where: { id } })
+        if (!existingRole || existingRole.organizationId !== organizationId) {
+            return NextResponse.json(
+                { error: 'Rol no encontrado' },
+                { status: 404 }
             )
         }
 
@@ -113,6 +147,13 @@ export async function PUT(request: NextRequest) {
 // DELETE - Eliminar rol
 export async function DELETE(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        const organizationId = session?.user?.organizationId
+
+        if (!organizationId) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        }
+
         const { searchParams } = new URL(request.url)
         const id = searchParams.get('id')
 
@@ -120,6 +161,15 @@ export async function DELETE(request: NextRequest) {
             return NextResponse.json(
                 { error: 'ID de rol requerido' },
                 { status: 400 }
+            )
+        }
+
+        // Verify ownership
+        const existingRole = await prisma.role.findUnique({ where: { id } })
+        if (!existingRole || existingRole.organizationId !== organizationId) {
+            return NextResponse.json(
+                { error: 'Rol no encontrado' },
+                { status: 404 }
             )
         }
 

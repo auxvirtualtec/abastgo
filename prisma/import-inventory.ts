@@ -120,6 +120,24 @@ async function main() {
 
     let totalImported = 0
 
+    // Obtener o crear organización por defecto para migración
+    const defaultOrgSlug = 'system-migration'
+    let organization = await prisma.organization.findUnique({
+        where: { slug: defaultOrgSlug }
+    })
+
+    if (!organization) {
+        organization = await prisma.organization.create({
+            data: {
+                name: 'System Migration Org',
+                slug: defaultOrgSlug,
+                stripeCustomerId: 'cus_migration_placeholder', // Placeholder
+            }
+        })
+        console.log(`🏢 Organización por defecto creada: ${organization.name}`)
+    }
+    const organizationId = organization.id
+
     for (const file of files) {
         const epsConfig = EPS_CONFIG[file as keyof typeof EPS_CONFIG]
         if (!epsConfig) {
@@ -131,9 +149,15 @@ async function main() {
 
         // Crear o actualizar EPS
         const eps = await prisma.ePS.upsert({
-            where: { code: epsConfig.code },
+            where: {
+                organizationId_code: {
+                    organizationId,
+                    code: epsConfig.code
+                }
+            },
             update: {},
             create: {
+                organizationId,
                 code: epsConfig.code,
                 name: epsConfig.name,
                 hasApi: false,
@@ -169,9 +193,15 @@ async function main() {
             const warehouseName = `${warehouseRows[0].bodegaName} (${epsConfig.name})`
 
             const warehouse = await prisma.warehouse.upsert({
-                where: { code: warehouseCode },
+                where: {
+                    organizationId_code: {
+                        organizationId,
+                        code: warehouseCode
+                    }
+                },
                 update: {},
                 create: {
+                    organizationId,
                     code: warehouseCode,
                     name: warehouseName,
                     type: warehouseName.toLowerCase().includes('bodega') ? 'BODEGA' : 'DISPENSARIO',
@@ -197,9 +227,15 @@ async function main() {
                 const description = itemRows.find(r => r.itemDescription)?.itemDescription || `Producto ${itemCode}`
 
                 const product = await prisma.product.upsert({
-                    where: { code: productCode },
+                    where: {
+                        organizationId_code: {
+                            organizationId,
+                            code: productCode
+                        }
+                    },
                     update: {},
                     create: {
+                        organizationId,
                         code: productCode,
                         name: description,
                         price: itemRows[0].unitCost,

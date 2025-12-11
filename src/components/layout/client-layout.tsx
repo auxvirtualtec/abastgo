@@ -3,6 +3,10 @@
 import { usePathname } from "next/navigation";
 import { SessionProvider } from "next-auth/react";
 import { AppSidebar, MobileNav } from "@/components/layout/sidebar";
+import { useState, useEffect } from "react";
+import { Button } from "@/components/ui/button";
+import { PanelLeftOpen } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 export default function ClientLayout({
     children,
@@ -10,9 +14,10 @@ export default function ClientLayout({
     children: React.ReactNode;
 }) {
     const pathname = usePathname();
+    const [sidebarOpen, setSidebarOpen] = useState(true);
 
     // No mostrar sidebar en rutas de auth
-    const isAuthRoute = pathname?.startsWith("/login");
+    const isAuthRoute = pathname?.startsWith("/login") || pathname?.startsWith("/register");
 
     if (isAuthRoute) {
         return <SessionProvider>{children}</SessionProvider>;
@@ -22,12 +27,28 @@ export default function ClientLayout({
         <SessionProvider>
             <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
                 {/* Sidebar Desktop */}
-                <AppSidebar />
+                <AppSidebar
+                    className={cn(
+                        "transition-all duration-300 z-30",
+                        !sidebarOpen ? "-translate-x-full lg:w-0 lg:hidden opacity-0" : "opacity-100"
+                    )}
+                    onClose={() => setSidebarOpen(false)}
+                />
 
                 {/* Main Content */}
-                <div className="lg:pl-64">
-                    {/* Top Bar Mobile */}
-                    <header className="sticky top-0 z-40 flex h-16 items-center gap-4 border-b border-gray-200 dark:border-gray-800 bg-white/95 dark:bg-gray-900/95 backdrop-blur px-4 lg:hidden">
+                <div className={cn(
+                    "transition-all duration-300 ease-in-out min-h-screen flex flex-col",
+                    sidebarOpen ? "lg:pl-64" : "lg:pl-0"
+                )}>
+                    {/* Top Bar Mobile & Desktop Toggle */}
+                    <header className={cn(
+                        "sticky top-0 z-40 flex h-16 items-center gap-4 border-b border-gray-200 dark:border-gray-800 bg-white/95 dark:bg-gray-900/95 backdrop-blur px-4",
+                        // En desktop normal (sidebar abierto), el header móvil se oculta.
+                        // Pero si el sidebar está cerrado, queremos mostrar el botón de abrir.
+                        // Así que mostramos header siempre si sidebar cerrado? 
+                        // O solo el botón flotante.
+                        "lg:hidden" // Header móvil original
+                    )}>
                         <MobileNav />
                         <div className="flex items-center gap-2">
                             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-emerald-500 flex items-center justify-center">
@@ -45,12 +66,27 @@ export default function ClientLayout({
                                     />
                                 </svg>
                             </div>
-                            <span className="font-bold text-lg">AbastGo</span>
+                            <span className="font-bold text-lg">DispenzaBot</span>
                         </div>
                     </header>
 
+                    {/* Botón flotante desktop para abrir sidebar */}
+                    {!sidebarOpen && (
+                        <div className="hidden lg:block fixed top-4 left-4 z-50 animate-in fade-in slide-in-from-left-2 duration-300">
+                            <Button
+                                variant="outline"
+                                size="icon"
+                                className="shadow-md bg-white border-gray-200 hover:bg-gray-100 dark:bg-gray-800 dark:border-gray-700"
+                                onClick={() => setSidebarOpen(true)}
+                                title="Mostrar menú"
+                            >
+                                <PanelLeftOpen className="h-5 w-5" />
+                            </Button>
+                        </div>
+                    )}
+
                     {/* Page Content */}
-                    <main className="p-4 lg:p-6">{children}</main>
+                    <main className="p-4 lg:p-6 flex-1">{children}</main>
                 </div>
             </div>
         </SessionProvider>

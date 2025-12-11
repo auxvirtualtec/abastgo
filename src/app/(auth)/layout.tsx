@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-    title: "Login - AbastGo",
+    title: "Login - DispenzaBot",
     description: "Inicia sesión en el sistema de gestión de dispensarios",
 };
 

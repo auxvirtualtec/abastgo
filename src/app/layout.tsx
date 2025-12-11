@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-    title: "AbastGo - Sistema de Gestión de Dispensarios",
-    description: "Sistema de gestión integral de inventarios, dispensación de medicamentos y reportes para dispensarios farmacéuticos",
+    title: "DispenzaBot - Gestión Farmacéutica",
+    description: "Sistema integral de gestión para dispensarios y droguerías, dispensación de medicamentos y reportes para dispensarios farmacéuticos",
 };
 
 export default function RootLayout({

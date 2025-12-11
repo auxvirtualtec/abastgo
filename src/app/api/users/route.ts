@@ -1,66 +1,69 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { getServerSession } from 'next-auth'
+import { authOptions } from '@/lib/auth'
 import bcrypt from 'bcryptjs'
 
-// GET - Listar usuarios
+// GET - List users in the current organization
 export async function GET(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        if (!session?.user?.organizationId) {
+            return NextResponse.json({ error: 'Sin organización activa' }, { status: 403 })
+        }
+
         const { searchParams } = new URL(request.url)
         const search = searchParams.get('search')
         const includeInactive = searchParams.get('includeInactive') === 'true'
 
-        const users = await prisma.user.findMany({
+        // Get organization members
+        const members = await prisma.organizationMember.findMany({
             where: {
-                ...(search && {
-                    OR: [
-                        { name: { contains: search, mode: 'insensitive' } },
-                        { email: { contains: search, mode: 'insensitive' } }
-                    ]
-                }),
-                ...(includeInactive ? {} : { isActive: true })
+                organizationId: session.user.organizationId
             },
             include: {
-                roles: {
+                user: {
                     include: {
-                        role: {
-                            include: {
-                                permissions: {
-                                    include: { permission: true }
-                                }
-                            }
+                        warehouseUsers: {
+                            include: { warehouse: true }
                         }
                     }
-                },
-                warehouseUsers: {
-                    include: { warehouse: true }
                 }
-            },
-            orderBy: { name: 'asc' }
+            }
         })
 
-        // Transformar para ocultar hash
-        const safeUsers = users.map(u => ({
-            id: u.id,
-            email: u.email,
-            name: u.name,
-            phone: u.phone,
-            isActive: u.isActive,
-            createdAt: u.createdAt,
-            roles: u.roles.map(r => ({
-                id: r.role.id,
-                name: r.role.name,
-                permissions: r.role.permissions.map(p => p.permission.code)
-            })),
-            warehouses: u.warehouseUsers.map(wu => ({
-                id: wu.warehouse.id,
-                name: wu.warehouse.name,
-                code: wu.warehouse.code
+        // Filter and transform
+        let users = members
+            .filter(m => {
+                if (!includeInactive && !m.user.isActive) return false
+                if (search) {
+                    const s = search.toLowerCase()
+                    return m.user.name?.toLowerCase().includes(s) ||
+                        m.user.email.toLowerCase().includes(s)
+                }
+                return true
+            })
+            .map(m => ({
+                id: m.user.id,
+                email: m.user.email,
+                name: m.user.name || 'Sin nombre',
+                phone: m.user.phone,
+                isActive: m.user.isActive,
+                createdAt: m.user.createdAt,
+                role: m.role, // MemberRole from OrganizationMember
+                warehouses: m.user.warehouseUsers
+                    .filter(wu => wu.warehouse.organizationId === session.user.organizationId)
+                    .map(wu => ({
+                        id: wu.warehouse.id,
+                        name: wu.warehouse.name,
+                        code: wu.warehouse.code
+                    }))
             }))
-        }))
+            .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
 
-        return NextResponse.json({ users: safeUsers })
+        return NextResponse.json({ users })
     } catch (error) {
-        console.error('Error listando usuarios:', error)
+        console.error('Error listing users:', error)
         return NextResponse.json(
             { error: 'Error listando usuarios', details: String(error) },
             { status: 500 }
@@ -68,11 +71,21 @@ export async function GET(request: NextRequest) {
     }
 }
 
-// POST - Crear usuario
+// POST - Create user and add to organization
 export async function POST(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        if (!session?.user?.organizationId) {
+            return NextResponse.json({ error: 'Sin organización activa' }, { status: 403 })
+        }
+
+        // Check admin permission
+        if (!session.user.orgRole || !['OWNER', 'ADMIN'].includes(session.user.orgRole)) {
+            return NextResponse.json({ error: 'Solo administradores pueden crear usuarios' }, { status: 403 })
+        }
+
         const body = await request.json()
-        const { email, password, name, phone, roleIds, warehouseIds } = body
+        const { email, password, name, phone, role, warehouseIds } = body
 
         if (!email || !password || !name) {
             return NextResponse.json(
@@ -81,48 +94,64 @@ export async function POST(request: NextRequest) {
             )
         }
 
-        // Verificar email único
-        const existing = await prisma.user.findUnique({ where: { email } })
-        if (existing) {
-            return NextResponse.json(
-                { error: 'El email ya está registrado' },
-                { status: 400 }
-            )
+        // Check if user already exists
+        let user = await prisma.user.findUnique({ where: { email } })
+
+        if (user) {
+            // Check if already in this org
+            const existingMember = await prisma.organizationMember.findUnique({
+                where: {
+                    organizationId_userId: {
+                        organizationId: session.user.organizationId,
+                        userId: user.id
+                    }
+                }
+            })
+            if (existingMember) {
+                return NextResponse.json(
+                    { error: 'El usuario ya pertenece a esta organización' },
+                    { status: 400 }
+                )
+            }
+        } else {
+            // Create new user
+            const passwordHash = await bcrypt.hash(password, 10)
+            user = await prisma.user.create({
+                data: {
+                    email,
+                    passwordHash,
+                    name,
+                    phone
+                }
+            })
         }
 
-        // Hash de contraseña
-        const passwordHash = await bcrypt.hash(password, 10)
-
-        // Crear usuario con roles y bodegas
-        const user = await prisma.user.create({
+        // Add to organization with role
+        await prisma.organizationMember.create({
             data: {
-                email,
-                passwordHash,
-                name,
-                phone,
-                roles: {
-                    create: roleIds?.map((roleId: string) => ({ roleId })) || []
-                },
-                warehouseUsers: {
-                    create: warehouseIds?.map((warehouseId: string) => ({ warehouseId })) || []
-                }
-            },
-            include: {
-                roles: { include: { role: true } }
+                organizationId: session.user.organizationId,
+                userId: user.id,
+                role: role || 'DISPENSER'
             }
         })
 
+        // Assign warehouses
+        if (warehouseIds && warehouseIds.length > 0) {
+            await prisma.warehouseUser.createMany({
+                data: warehouseIds.map((warehouseId: string) => ({
+                    userId: user!.id,
+                    warehouseId
+                })),
+                skipDuplicates: true
+            })
+        }
+
         return NextResponse.json({
             success: true,
-            user: {
-                id: user.id,
-                email: user.email,
-                name: user.name,
-                roles: user.roles.map(r => r.role.name)
-            }
+            user: { id: user.id, email: user.email, name: user.name, role }
         }, { status: 201 })
     } catch (error) {
-        console.error('Error creando usuario:', error)
+        console.error('Error creating user:', error)
         return NextResponse.json(
             { error: 'Error creando usuario', details: String(error) },
             { status: 500 }
@@ -130,54 +159,76 @@ export async function POST(request: NextRequest) {
     }
 }
 
-// PUT - Actualizar usuario
+// PUT - Update user role and warehouses
 export async function PUT(request: NextRequest) {
     try {
-        const body = await request.json()
-        const { id, email, password, name, phone, roleIds, warehouseIds, isActive } = body
-
-        if (!id) {
-            return NextResponse.json(
-                { error: 'ID de usuario requerido' },
-                { status: 400 }
-            )
+        const session = await getServerSession(authOptions)
+        if (!session?.user?.organizationId) {
+            return NextResponse.json({ error: 'Sin organización activa' }, { status: 403 })
         }
 
+        const body = await request.json()
+        const { id, name, phone, role, warehouseIds, isActive } = body
+
+        if (!id) {
+            return NextResponse.json({ error: 'ID de usuario requerido' }, { status: 400 })
+        }
+
+        // Update user basic info
         const updateData: any = {}
-        if (email) updateData.email = email
         if (name) updateData.name = name
         if (phone !== undefined) updateData.phone = phone
         if (isActive !== undefined) updateData.isActive = isActive
-        if (password) updateData.passwordHash = await bcrypt.hash(password, 10)
 
-        // Actualizar usuario
-        const user = await prisma.user.update({
-            where: { id },
-            data: updateData
-        })
+        if (Object.keys(updateData).length > 0) {
+            await prisma.user.update({ where: { id }, data: updateData })
+        }
 
-        // Actualizar roles si se proporcionan
-        if (roleIds) {
-            await prisma.userRole.deleteMany({ where: { userId: id } })
-            await prisma.userRole.createMany({
-                data: roleIds.map((roleId: string) => ({ userId: id, roleId }))
+        // Update role in OrganizationMember
+        if (role) {
+            await prisma.organizationMember.update({
+                where: {
+                    organizationId_userId: {
+                        organizationId: session.user.organizationId,
+                        userId: id
+                    }
+                },
+                data: { role }
             })
         }
 
-        // Actualizar bodegas si se proporcionan
-        if (warehouseIds) {
-            await prisma.warehouseUser.deleteMany({ where: { userId: id } })
-            await prisma.warehouseUser.createMany({
-                data: warehouseIds.map((warehouseId: string) => ({ userId: id, warehouseId }))
+        // Update warehouse assignments (for this org only)
+        if (warehouseIds !== undefined) {
+            // Get org's warehouses
+            const orgWarehouses = await prisma.warehouse.findMany({
+                where: { organizationId: session.user.organizationId },
+                select: { id: true }
             })
+            const orgWarehouseIds = orgWarehouses.map(w => w.id)
+
+            // Delete user's assignments for this org's warehouses
+            await prisma.warehouseUser.deleteMany({
+                where: {
+                    userId: id,
+                    warehouseId: { in: orgWarehouseIds }
+                }
+            })
+
+            // Create new assignments
+            if (warehouseIds.length > 0) {
+                await prisma.warehouseUser.createMany({
+                    data: warehouseIds.map((warehouseId: string) => ({
+                        userId: id,
+                        warehouseId
+                    })),
+                    skipDuplicates: true
+                })
+            }
         }
 
-        return NextResponse.json({
-            success: true,
-            user: { id: user.id, email: user.email, name: user.name }
-        })
+        return NextResponse.json({ success: true })
     } catch (error) {
-        console.error('Error actualizando usuario:', error)
+        console.error('Error updating user:', error)
         return NextResponse.json(
             { error: 'Error actualizando usuario', details: String(error) },
             { status: 500 }
@@ -185,19 +236,22 @@ export async function PUT(request: NextRequest) {
     }
 }
 
-// DELETE - Desactivar usuario (soft delete)
+// DELETE - Remove user from organization (soft)
 export async function DELETE(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions)
+        if (!session?.user?.organizationId) {
+            return NextResponse.json({ error: 'Sin organización activa' }, { status: 403 })
+        }
+
         const { searchParams } = new URL(request.url)
         const id = searchParams.get('id')
 
         if (!id) {
-            return NextResponse.json(
-                { error: 'ID de usuario requerido' },
-                { status: 400 }
-            )
+            return NextResponse.json({ error: 'ID de usuario requerido' }, { status: 400 })
         }
 
+        // Deactivate user (don't remove from org, just deactivate)
         await prisma.user.update({
             where: { id },
             data: { isActive: false }
@@ -205,7 +259,7 @@ export async function DELETE(request: NextRequest) {
 
         return NextResponse.json({ success: true })
     } catch (error) {
-        console.error('Error desactivando usuario:', error)
+        console.error('Error deactivating user:', error)
         return NextResponse.json(
             { error: 'Error desactivando usuario', details: String(error) },
             { status: 500 }
